@@ -40,7 +40,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
           "http://localhost:3000",
-          "http://localhost:3001"
+          "http://localhost:3001",
+          "https://fixmystreet-backend-o9ox.onrender.com"
     ],
     allow_credentials=True,
     allow_methods=["*"],

@@ -38,7 +38,7 @@ export default function Home() {
   setReportMessage('Submitting your complaint...');
 
   try {
-    const response = await fetch('http://localhost:8000/report', {
+    const response = await fetch('https://fixmystreet-backend-o9ox.onrender.com/report', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
