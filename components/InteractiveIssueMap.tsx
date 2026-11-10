@@ -41,30 +41,46 @@ export default function InteractiveIssueMap({
   const [mapLoaded, setMapLoaded] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  // Initialize Map
+  // Initialize Map safely
   useEffect(() => {
     let isMounted = true;
+    let resizeObserver: ResizeObserver | null = null;
 
     async function initMap() {
-      if (!mapContainerRef.current || mapRef.current) return;
+      if (!mapContainerRef.current) return;
+
+      // Clean up any existing map or stale Leaflet ID on the DOM container
+      if (mapRef.current) {
+        try {
+          mapRef.current.remove();
+        } catch (e) {
+          console.warn('Error removing previous map instance:', e);
+        }
+        mapRef.current = null;
+      }
+
+      if ((mapContainerRef.current as any)._leaflet_id) {
+        delete (mapContainerRef.current as any)._leaflet_id;
+      }
 
       const L = (await import('leaflet')).default;
-
       if (!isMounted || !mapContainerRef.current) return;
 
-      // Jalandhar center
+      // Center on Jalandhar City Center
       const defaultCenter: [number, number] = [31.3260, 75.5762];
+      
       const map = L.map(mapContainerRef.current, {
         center: defaultCenter,
         zoom: 13,
         zoomControl: false,
         attributionControl: false,
+        scrollWheelZoom: true,
       });
 
-      // Warm CartoDB Positron / OSM tiles for design aesthetic
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+      // Standard, ultra-reliable OpenStreetMap tile layer
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19,
-        subdomains: 'abcd',
+        subdomains: ['a', 'b', 'c'],
       }).addTo(map);
 
       // Attribution
@@ -75,18 +91,55 @@ export default function InteractiveIssueMap({
 
       mapRef.current = map;
       setMapLoaded(true);
+
+      // Invalidate size on container layout changes to prevent gray/unrendered tiles
+      const invalidate = () => {
+        if (mapRef.current) {
+          mapRef.current.invalidateSize();
+        }
+      };
+
+      setTimeout(invalidate, 100);
+      setTimeout(invalidate, 300);
+      setTimeout(invalidate, 700);
+
+      if (typeof ResizeObserver !== 'undefined' && mapContainerRef.current) {
+        resizeObserver = new ResizeObserver(() => {
+          invalidate();
+        });
+        resizeObserver.observe(mapContainerRef.current);
+      }
     }
 
     initMap();
 
     return () => {
       isMounted = false;
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+      }
       if (mapRef.current) {
-        mapRef.current.remove();
+        try {
+          mapRef.current.remove();
+        } catch (e) {
+          // ignore cleanup error
+        }
         mapRef.current = null;
+      }
+      if (mapContainerRef.current && (mapContainerRef.current as any)._leaflet_id) {
+        delete (mapContainerRef.current as any)._leaflet_id;
       }
     };
   }, []);
+
+  // Invalidate map size whenever fullscreen changes
+  useEffect(() => {
+    if (mapRef.current) {
+      setTimeout(() => {
+        mapRef.current?.invalidateSize();
+      }, 150);
+    }
+  }, [isFullscreen]);
 
   // Update Markers when issues change
   useEffect(() => {
@@ -107,7 +160,7 @@ export default function InteractiveIssueMap({
       const bounds: [number, number][] = [];
 
       issues.forEach((issue) => {
-        // Fallback default coordinates if not provided
+        // Fallback coordinates across Jalandhar if coordinates not set
         let lat = issue.latitude;
         let lng = issue.longitude;
 
@@ -121,9 +174,12 @@ export default function InteractiveIssueMap({
           } else if (issue.category.toLowerCase().includes('light')) {
             lat = 31.3340;
             lng = 75.5680;
-          } else {
+          } else if (issue.category.toLowerCase().includes('drain')) {
             lat = 31.3180;
             lng = 75.5800;
+          } else {
+            lat = 31.3220;
+            lng = 75.5720;
           }
         }
 
@@ -164,15 +220,16 @@ export default function InteractiveIssueMap({
 
         const marker = L.marker([lat, lng], { icon: customIcon }).addTo(map);
 
-        // Rich Popup Content with Priority & Duplicate support
+        // Priority Badge HTML
         const priorityBadge = isUrgent
           ? '<span style="background:#faebea;color:#b52b20;border:1px solid #f5b8b3;padding:2px 6px;border-radius:3px;font-size:9px;font-weight:700;letter-spacing:0.5px;">🔥 URGENT</span>'
           : issue.priority && issue.priority !== 'Normal'
           ? `<span style="background:#fcf1e8;color:#b85b24;border:1px solid #f6cca8;padding:2px 6px;border-radius:3px;font-size:9px;">${escapeHtml(issue.priority)}</span>`
           : '';
 
+        // Duplicate Notification in popup
         const duplicateNotice = issue.duplicate_of
-          ? `<div style="background:#fffcf4;border:1px solid #f3d489;color:#8c5b05;font-size:10px;padding:4px 6px;border-radius:3px;margin-top:6px;">⚠️ Duplicate of ${escapeHtml(issue.master_reference_id || `FMS-JAL-${issue.duplicate_of}`)}</div>`
+          ? `<div style="background:#fffcf4;border:1px solid #f3d489;color:#8c5b05;font-size:10px;padding:4px 6px;border-radius:3px;margin:6px 0;">⚠️ Duplicate of ${escapeHtml(issue.master_reference_id || `FMS-JAL-${issue.duplicate_of}`)}</div>`
           : '';
 
         const popupContent = `
@@ -187,14 +244,18 @@ export default function InteractiveIssueMap({
                 <span class="popup-id">${issue.reference_id} · ${issue.category.toUpperCase()}</span>
                 ${priorityBadge}
               </div>
-              <h4 class="popup-title">${escapeHtml(issue.description.slice(0, 70))}${
-          issue.description.length > 70 ? '...' : ''
+              <h4 class="popup-title">${escapeHtml(issue.description.slice(0, 75))}${
+          issue.description.length > 75 ? '...' : ''
         }</h4>
               <p class="popup-loc">📍 ${escapeHtml(issue.location)}</p>
               ${duplicateNotice}
-              <div class="popup-footer">
+              <div class="popup-footer" style="margin-bottom:8px;">
                 <span class="popup-status status-${tone}">${issue.status}</span>
                 <span class="popup-date">${new Date(issue.created_at).toLocaleDateString()}</span>
+              </div>
+              <div style="display:flex;gap:6px;border-top:1px solid #f0eee8;padding-top:8px;">
+                <a href="/track?id=${encodeURIComponent(issue.reference_id)}" style="flex:1;background:#faf8f4;border:1px solid #dedbd0;color:#555;padding:5px 8px;border-radius:3px;font-size:10px;text-align:center;font-family:var(--mono);text-decoration:none;">Track ↗</a>
+                <button type="button" id="btn-inspect-${issue.id}" style="flex:1;background:var(--orange);border:1px solid var(--orange-dark);color:#fff;padding:5px 8px;border-radius:3px;font-size:10px;text-align:center;font-family:var(--mono);cursor:pointer;">Details ↗</button>
               </div>
             </div>
           </div>
@@ -202,16 +263,29 @@ export default function InteractiveIssueMap({
 
         marker.bindPopup(popupContent, { maxWidth: 280, className: 'leaflet-custom-popup' });
 
-        marker.on('click', () => {
-          if (onSelectIssue) onSelectIssue(issue);
+        // When popup opens, attach click listener to the "Details" button
+        marker.on('popupopen', () => {
+          const btn = document.getElementById(`btn-inspect-${issue.id}`);
+          if (btn && onSelectIssue) {
+            btn.onclick = () => {
+              onSelectIssue(issue);
+            };
+          }
         });
 
         markersRef.current[issue.id] = marker;
       });
 
-      // Fit map bounds if multiple issues
+      // Safely fit map bounds if distinct coordinates exist
       if (bounds.length > 0 && !selectedIssue) {
-        map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
+        const uniqueLats = new Set(bounds.map((b) => b[0]));
+        const uniqueLngs = new Set(bounds.map((b) => b[1]));
+
+        if (uniqueLats.size === 1 && uniqueLngs.size === 1) {
+          map.setView(bounds[0], 14);
+        } else {
+          map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
+        }
       }
     }
 
@@ -222,14 +296,14 @@ export default function InteractiveIssueMap({
     };
   }, [issues, mapLoaded]);
 
-  // Handle selected issue focus
+  // Handle selected issue focus from outside
   useEffect(() => {
     if (!mapRef.current || !selectedIssue) return;
 
     let lat = selectedIssue.latitude || 31.3260;
     let lng = selectedIssue.longitude || 75.5762;
 
-    mapRef.current.flyTo([lat, lng], 15, { duration: 1.2 });
+    mapRef.current.flyTo([lat, lng], 15, { duration: 1.0 });
 
     const marker = markersRef.current[selectedIssue.id];
     if (marker) {
@@ -282,6 +356,7 @@ export default function InteractiveIssueMap({
         }}
       >
         <button
+          type="button"
           onClick={resetView}
           className="map-control-btn"
           title="Recenter Map on Jalandhar"
@@ -289,6 +364,7 @@ export default function InteractiveIssueMap({
           <Navigation size={15} />
         </button>
         <button
+          type="button"
           onClick={() => setIsFullscreen(!isFullscreen)}
           className="map-control-btn"
           title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen Map'}
@@ -304,16 +380,17 @@ export default function InteractiveIssueMap({
           bottom: 14,
           left: 14,
           zIndex: 400,
-          background: 'rgba(255, 255, 255, 0.92)',
+          background: 'rgba(255, 255, 255, 0.94)',
           backdropFilter: 'blur(4px)',
           border: '1px solid #dedbd0',
-          padding: '6px 12px',
+          padding: '6px 14px',
           borderRadius: '20px',
           display: 'flex',
           alignItems: 'center',
           gap: '12px',
-          font: '9px var(--mono)',
+          font: '10px var(--mono)',
           letterSpacing: '0.5px',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
         }}
       >
         <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
@@ -323,7 +400,10 @@ export default function InteractiveIssueMap({
           <i style={{ width: 8, height: 8, borderRadius: '50%', background: '#5a7d61', display: 'inline-block' }} /> Resolved
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-          <i style={{ width: 8, height: 8, borderRadius: '50%', background: '#3b668f', display: 'inline-block' }} /> Under Review
+          <i style={{ width: 8, height: 8, borderRadius: '50%', background: '#3b668f', display: 'inline-block' }} /> Pending
+        </span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#b52b20', fontWeight: 700 }}>
+          <i style={{ width: 8, height: 8, borderRadius: '50%', background: '#b52b20', display: 'inline-block' }} /> Urgent
         </span>
       </div>
     </div>

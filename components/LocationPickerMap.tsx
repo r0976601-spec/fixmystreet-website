@@ -26,12 +26,28 @@ export default function LocationPickerMap({
     lng: initialLng,
   });
   const [detecting, setDetecting] = useState(false);
+  const [geocoding, setGeocoding] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
+    let resizeObserver: ResizeObserver | null = null;
 
     async function init() {
-      if (!containerRef.current || mapRef.current) return;
+      if (!containerRef.current) return;
+
+      // Clean up previous instance or stale leaflet ID
+      if (mapRef.current) {
+        try {
+          mapRef.current.remove();
+        } catch (e) {
+          // ignore
+        }
+        mapRef.current = null;
+      }
+
+      if ((containerRef.current as any)._leaflet_id) {
+        delete (containerRef.current as any)._leaflet_id;
+      }
 
       const L = (await import('leaflet')).default;
       if (!isMounted || !containerRef.current) return;
@@ -41,16 +57,18 @@ export default function LocationPickerMap({
         zoom: 14,
         zoomControl: false,
         attributionControl: false,
+        scrollWheelZoom: true,
       });
 
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+      // Reliable OpenStreetMap tile layer
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19,
-        subdomains: 'abcd',
+        subdomains: ['a', 'b', 'c'],
       }).addTo(map);
 
       L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-      // Custom Pin Icon
+      // High-visibility draggable Pin Icon
       const pinIcon = L.divIcon({
         className: 'custom-picker-pin',
         html: `
@@ -59,8 +77,8 @@ export default function LocationPickerMap({
             <div class="picker-pin-shadow"></div>
           </div>
         `,
-        iconSize: [32, 32],
-        iconAnchor: [16, 32],
+        iconSize: [36, 36],
+        iconAnchor: [18, 34],
       });
 
       const marker = L.marker([initialLat, initialLng], {
@@ -68,32 +86,92 @@ export default function LocationPickerMap({
         draggable: true,
       }).addTo(map);
 
+      marker.bindTooltip('Drag or click map to move pin', {
+        direction: 'top',
+        offset: [0, -32],
+        permanent: false,
+      });
+
       markerRef.current = marker;
+
+      // Reverse geocode helper
+      async function tryReverseGeocode(lat: number, lng: number) {
+        try {
+          setGeocoding(true);
+          const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`, {
+            headers: { 'Accept': 'application/json' },
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const addr = data.address || {};
+            const road = addr.road || addr.suburb || addr.neighbourhood || addr.residential;
+            const city = addr.city || addr.town || 'Jalandhar';
+            if (road) {
+              const label = `${road}, ${city}`;
+              onLocationSelected(lat, lng, label);
+              return;
+            }
+          }
+        } catch (e) {
+          // Fallback to coordinates
+        } finally {
+          setGeocoding(false);
+        }
+        onLocationSelected(lat, lng);
+      }
 
       // When marker is dragged
       marker.on('dragend', () => {
         const pos = marker.getLatLng();
         setCurrentCoords({ lat: pos.lat, lng: pos.lng });
-        onLocationSelected(pos.lat, pos.lng);
+        tryReverseGeocode(pos.lat, pos.lng);
       });
 
       // When map is clicked
       map.on('click', (e) => {
         marker.setLatLng(e.latlng);
         setCurrentCoords({ lat: e.latlng.lat, lng: e.latlng.lng });
-        onLocationSelected(e.latlng.lat, e.latlng.lng);
+        tryReverseGeocode(e.latlng.lat, e.latlng.lng);
       });
 
       mapRef.current = map;
+
+      // Invalidate map size to prevent gray tiles
+      const invalidate = () => {
+        if (mapRef.current) {
+          mapRef.current.invalidateSize();
+        }
+      };
+
+      setTimeout(invalidate, 100);
+      setTimeout(invalidate, 300);
+      setTimeout(invalidate, 700);
+
+      if (typeof ResizeObserver !== 'undefined' && containerRef.current) {
+        resizeObserver = new ResizeObserver(() => {
+          invalidate();
+        });
+        resizeObserver.observe(containerRef.current);
+      }
     }
 
     init();
 
     return () => {
       isMounted = false;
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+      }
       if (mapRef.current) {
-        mapRef.current.remove();
+        try {
+          mapRef.current.remove();
+        } catch (e) {
+          // ignore
+        }
         mapRef.current = null;
+      }
+      if (containerRef.current && (containerRef.current as any)._leaflet_id) {
+        delete (containerRef.current as any)._leaflet_id;
       }
     };
   }, []);
@@ -122,7 +200,7 @@ export default function LocationPickerMap({
       (err) => {
         console.warn('Geolocation error:', err);
         setDetecting(false);
-        alert('Could not retrieve GPS coordinates. You can click on the map directly to set the pin.');
+        alert('Could not retrieve GPS coordinates. You can click on the map directly to place the pin.');
       },
       { enableHighAccuracy: true, timeout: 10000 }
     );
@@ -139,43 +217,51 @@ export default function LocationPickerMap({
         disabled={detecting}
         style={{
           position: 'absolute',
-          top: 10,
-          right: 10,
+          top: 12,
+          right: 12,
           zIndex: 400,
           background: '#fff',
           border: '1px solid #d4d0c5',
           borderRadius: '4px',
           padding: '6px 10px',
-          cursor: 'pointer',
           display: 'flex',
           alignItems: 'center',
           gap: '6px',
           font: '10px var(--mono)',
+          cursor: detecting ? 'wait' : 'pointer',
           color: 'var(--ink)',
-          boxShadow: '0 2px 6px rgba(0,0,0,0.1)',
+          boxShadow: '0 2px 6px rgba(0,0,0,0.12)',
         }}
       >
         <LocateFixed size={13} color="var(--orange)" />
-        {detecting ? 'Locating...' : 'Pin my GPS'}
+        {detecting ? 'Locating...' : 'Use My GPS'}
       </button>
 
-      {/* Helper text footer */}
+      {/* Coordinate status bar at bottom */}
       <div
         style={{
-          padding: '6px 12px',
-          background: '#faf8f4',
-          borderTop: '1px solid #e8e5dc',
+          position: 'absolute',
+          bottom: 10,
+          left: 10,
+          zIndex: 400,
+          background: 'rgba(255, 255, 255, 0.94)',
+          backdropFilter: 'blur(4px)',
+          border: '1px solid #dedbd0',
+          padding: '4px 10px',
+          borderRadius: '16px',
+          font: '10px var(--mono)',
+          color: '#555',
+          boxShadow: '0 2px 6px rgba(0,0,0,0.06)',
           display: 'flex',
-          justifyContent: 'space-between',
           alignItems: 'center',
-          fontSize: '11px',
-          color: '#666',
+          gap: '6px',
         }}
       >
-        <span>💡 Click anywhere on the map or drag the pin to set issue location</span>
-        <span style={{ font: '10px var(--mono)', color: '#457952' }}>
+        <MapPin size={11} color="var(--orange)" />
+        <span>
           {currentCoords.lat.toFixed(4)}° N, {currentCoords.lng.toFixed(4)}° E
         </span>
+        {geocoding && <span style={{ color: 'var(--orange-dark)' }}>(resolving address...)</span>}
       </div>
     </div>
   );
